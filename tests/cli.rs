@@ -1030,3 +1030,104 @@ fn rejected_refresh_is_left_to_claude_without_relogin_or_credential_deletion() -
     assert_eq!(fs::read(transcript)?, saved);
     Ok(())
 }
+
+#[test]
+fn history_larger_than_64_mib_imports_recovers_and_preserves_conflicts() -> TestResult {
+    use sha2::{Digest, Sha256};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::Path;
+
+    fn hash_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+        let mut file = fs::File::open(path)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        Ok(format!("{:x}", hash.finalize()))
+    }
+
+    let f = Fixture::new()?;
+    f.add("personal")?;
+    let source = f.home.join("old-projects");
+    fs::create_dir_all(source.join("project"))?;
+    let source_file = source.join("project/large.jsonl");
+    let size = 65 * 1024 * 1024 + 17;
+    let mut file = fs::File::create(&source_file)?;
+    file.set_len(size)?;
+    file.write_all(b"history start\n")?;
+    file.seek(SeekFrom::Start(size - 13))?;
+    file.write_all(b"history end\n\n")?;
+    file.sync_all()?;
+    drop(file);
+    let expected = hash_file(&source_file)?;
+    success(
+        &f.command(&["history", "import"])
+            .arg(&source)
+            .arg("--agents-stopped")
+            .output()?,
+    );
+    let operation = fs::read_dir(f.root.join("backups"))?
+        .next()
+        .ok_or("missing backup")??
+        .path();
+    let id = operation.file_name().ok_or("missing recovery ID")?;
+    let snapshot = operation.join("snapshot/project/large.jsonl");
+    let destination = f.root.join("shared/claude/projects/project/large.jsonl");
+    assert_eq!(fs::metadata(&snapshot)?.len(), size);
+    assert_eq!(fs::metadata(&destination)?.len(), size);
+    assert_eq!(hash_file(&snapshot)?, expected);
+    assert_eq!(hash_file(&destination)?, expected);
+
+    // Recheck an already-copied large snapshot without the original source.
+    let manifest_path = operation.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    manifest["phase"] = json!("Snapshotting");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    fs::remove_dir_all(source)?;
+    success(
+        &f.command(&["history", "recover"])
+            .arg(id)
+            .arg("--agents-stopped")
+            .output()?,
+    );
+
+    // A changed destination remains untouched while the large incoming copy is retained.
+    fs::write(&destination, b"keep current history")?;
+    manifest["phase"] = json!("Merging");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    success(
+        &f.command(&["history", "recover"])
+            .arg(id)
+            .arg("--agents-stopped")
+            .output()?,
+    );
+    let conflict = operation.join("conflicts/project/large.jsonl");
+    assert_eq!(fs::read(&destination)?, b"keep current history");
+    assert_eq!(hash_file(&conflict)?, expected);
+
+    // Corruption beyond the old size limit must not publish or overwrite a conflict copy.
+    let mut file = fs::OpenOptions::new().write(true).open(&snapshot)?;
+    file.seek(SeekFrom::Start(64 * 1024 * 1024 + 1))?;
+    file.write_all(b"changed")?;
+    drop(file);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    failure(
+        &f.command(&["history", "recover"])
+            .arg(id)
+            .arg("--agents-stopped")
+            .output()?,
+        "backup verification failed",
+    );
+    assert_eq!(fs::read(&destination)?, b"keep current history");
+    assert_eq!(hash_file(&conflict)?, expected);
+    assert_eq!(
+        fs::read_dir(operation.join("conflicts/project"))?.count(),
+        1
+    );
+    Ok(())
+}
