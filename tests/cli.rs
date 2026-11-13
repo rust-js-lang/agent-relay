@@ -37,6 +37,7 @@ if [ "${1:-}" = --version ]; then
   exit 0
 fi
 if [ "${1:-}" = auth ] && [ "${2:-}" = login ]; then
+  if [ -n "${FAKE_LOGIN_LOG:-}" ]; then printf 'login\n' >> "$FAKE_LOGIN_LOG"; fi
   if [ "${FAKE_FAIL_LOGIN:-}" = yes ]; then exit 1; fi
   printf '%s' "${FAKE_EMAIL:-personal@example.test}" > "$CLAUDE_CONFIG_DIR/.identity"
   printf '%s' "credential-${FAKE_EMAIL:-personal@example.test}" > "$CLAUDE_CONFIG_DIR/.credentials.json"
@@ -284,7 +285,7 @@ fn failed_and_duplicate_logins_never_register_an_account_or_print_secrets() -> T
         "already registered",
     );
     let output = f.command(&["run"]).env("FAKE_FAIL_AUTH", "yes").output()?;
-    failure(&output, "Cannot verify login");
+    failure(&output, "Cannot verify saved login");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("sensitive-api-token"));
     let output = f
         .command(&["run"])
@@ -828,5 +829,41 @@ fn importing_an_account_home_is_refused_before_credentials_can_be_copied() -> Te
             .join("shared/claude/projects/.credentials.json")
             .exists()
     );
+    Ok(())
+}
+
+#[test]
+fn switching_and_failed_status_checks_never_invoke_login() -> TestResult {
+    let f = Fixture::new()?;
+    let log = f.home.join("login-invocations");
+    for name in ["personal", "work"] {
+        success(
+            &f.command(&["account", "add", name])
+                .env("FAKE_EMAIL", format!("{name}@example.test"))
+                .env("FAKE_LOGIN_LOG", &log)
+                .output()?,
+        );
+    }
+    assert_eq!(fs::read_to_string(&log)?.lines().count(), 2);
+    success(
+        &f.command(&["run", "personal"])
+            .env("FAKE_LOGIN_LOG", &log)
+            .output()?,
+    );
+    for name in ["work", "personal", "work"] {
+        success(
+            &f.command(&["run", name, "--", "--continue"])
+                .env("FAKE_LOGIN_LOG", &log)
+                .output()?,
+        );
+    }
+    let output = f
+        .command(&["run", "personal"])
+        .env("FAKE_FAIL_AUTH", "yes")
+        .env("FAKE_LOGIN_LOG", &log)
+        .output()?;
+    failure(&output, "status-check failure does not prove");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("account login"));
+    assert_eq!(fs::read_to_string(&log)?.lines().count(), 2);
     Ok(())
 }

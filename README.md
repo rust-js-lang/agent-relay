@@ -48,6 +48,8 @@ agent-relay doctor work
 
 Changing the default does not change a running process's account. There is no automatic switching inside a live session. Exit Claude and launch the next account to resume.
 
+Log in once per account, then reuse those saved logins. `run`, `doctor`, and default selection never invoke browser login or log an account out. Claude owns automatic access-token refresh; switching accounts does not invalidate another account's saved login. Browser sign-in can still be necessary when the saved refresh credential expires, is revoked, or becomes unavailable. A failed local status probe is not proof of expiry: Relay refuses the unverified launch, preserves the login, and suggests retrying rather than automatically reauthenticating. Aged-but-refreshable login behavior is a live acceptance requirement.
+
 ## History guarantees and limits
 
 - Each account's `projects/` is a link to the same transcript tree. Conversations and project memory are visible across these accounts. Prompt history (`history.jsonl`) is also a live link to a shared file.

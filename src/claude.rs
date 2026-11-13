@@ -272,7 +272,7 @@ impl Claude {
             self.command(home, project)
                 .args(["auth", "status", "--json"]),
         )
-        .context("Cannot verify login; use agent-relay account login <name>")?;
+        .context("Cannot verify saved login; retry first. A status-check failure does not prove that sign-in expired; credentials were left untouched")?;
         let auth: AuthStatus = serde_json::from_str(&output).map_err(|_| {
             anyhow::anyhow!(
                 "Unrecognized Claude auth status JSON; no subscription launch was authorized"
