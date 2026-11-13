@@ -6,7 +6,7 @@ Each account logs in independently through the official Claude CLI. Accounts sha
 
 ## Install
 
-Requires macOS or Linux, Rust 1.100, and the official Claude CLI. The toolchain file and CI pin Rust 1.100.0. Windows is not supported yet.
+Requires macOS or Linux, Rust 1.100, and the official Claude CLI. The toolchain file pins Rust 1.100.0. Windows is not supported yet.
 
 ```sh
 cargo install --path . --locked
@@ -108,13 +108,15 @@ backups/import-<id>/           manifest, snapshot, preserved conflicts
 locks/                        persistent OS lock files
 ```
 
-## Development and verification
+## Local development and verification
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
+
+Validation runs locally; this repository does not use GitHub Actions.
 
 Integration tests use a fake Claude executable and isolated temporary homes. They cover cross-account resume plumbing, authentication conflicts, default selection, process exit and signals, concurrent-writer exclusion, corrupt metadata, and import recovery. They do not prove compatibility with a live Claude service.
 
