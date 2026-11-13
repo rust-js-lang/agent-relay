@@ -78,7 +78,9 @@ If interrupted, use the recovery ID printed before copying begins:
 agent-relay history recover import-<id> --agents-stopped
 ```
 
-Recovery verifies hashes and resumes from the saved manifest. Backups are retained. The source is required until snapshotting finishes; afterward recovery uses the snapshot. Imports reject symlinks and special files rather than following them into unrelated data. Individual imported files are limited to 64 MiB.
+Recovery verifies hashes and resumes from the saved manifest. Backups are retained. The source is required until snapshotting finishes; afterward recovery uses the snapshot. Imports reject symlinks and special files rather than following them into unrelated data.
+
+History files are hashed and copied using a fixed 1 MiB buffer, with no per-transcript size cap. Large transcripts do not need to fit in memory. Allow time to read each file and sufficient free disk space: an initial import retains a snapshot and a destination copy, roughly twice the source size in additional storage. Conflicts and retained backups from repeated imports can require more. A changed or incomplete copy is never published as a verified file. The 64 MiB limit still applies to configuration/settings and the recovery manifest, which are parsed as JSON; it no longer applies to transcript content.
 
 ## Subscription checks
 

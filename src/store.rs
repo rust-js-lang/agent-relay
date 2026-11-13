@@ -1,8 +1,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
@@ -43,10 +42,6 @@ pub fn valid_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
-
 pub fn ensure_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path
         .parent()
@@ -80,6 +75,18 @@ pub fn ensure_dir(path: &Path) -> Result<()> {
 }
 
 pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
+    let file = open_regular(path)?;
+    let mut data = Vec::new();
+    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut data)?;
+    ensure!(
+        data.len() <= 64 * 1024 * 1024,
+        "File exceeds 64 MiB: {}",
+        path.display()
+    );
+    Ok(data)
+}
+
+pub fn open_regular(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -92,18 +99,17 @@ pub fn read_regular(path: &Path) -> Result<Vec<u8>> {
         "Expected a regular file: {}",
         path.display()
     );
-    use std::io::Read;
-    let mut data = Vec::new();
-    file.take(64 * 1024 * 1024 + 1).read_to_end(&mut data)?;
-    ensure!(
-        data.len() <= 64 * 1024 * 1024,
-        "File exceeds 64 MiB: {}",
-        path.display()
-    );
-    Ok(data)
+    Ok(file)
 }
 
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with(path, |file| {
+        file.write_all(bytes)?;
+        Ok(())
+    })
+}
+
+pub fn atomic_write_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Result<()> {
     let parent = path.parent().context("File has no parent")?;
     ensure_dir(parent)?;
     if let Ok(meta) = fs::symlink_metadata(path) {
@@ -124,7 +130,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .mode(0o600)
         .open(&temp)?;
     let result = (|| {
-        file.write_all(bytes)?;
+        write(&mut file)?;
         file.sync_all()?;
         fs::rename(&temp, path)?;
         File::open(parent)?.sync_all()?;
@@ -352,4 +358,25 @@ fn absolute_root(path: &Path) -> Result<PathBuf> {
         absolute_root(parent)?
     };
     Ok(parent.join(path.file_name().context("Invalid application root")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_staged_write_leaves_original_and_cleans_up_partial_output() -> Result<()> {
+        let temporary = tempfile::TempDir::new()?;
+        let root = temporary.path().canonicalize()?;
+        let target = root.join("history.jsonl");
+        fs::write(&target, b"original history")?;
+        let result = atomic_write_with(&target, |output| {
+            output.write_all(b"partial copy")?;
+            Err(std::io::Error::other("simulated write failure").into())
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&target)?, b"original history");
+        assert_eq!(fs::read_dir(root)?.count(), 1);
+        Ok(())
+    }
 }

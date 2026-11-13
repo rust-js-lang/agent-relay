@@ -1,7 +1,9 @@
-use crate::store::{Store, atomic_write, digest, ensure_dir, read_regular, write_json};
+use crate::store::{Store, atomic_write_with, ensure_dir, open_regular, read_regular, write_json};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,7 +49,7 @@ fn inventory(root: &Path, current: &Path, entries: &mut Vec<Entry>) -> Result<()
             );
             entries.push(Entry {
                 path: path.strip_prefix(root)?.to_path_buf(),
-                sha256: digest(&read_regular(&path)?),
+                sha256: hash_file(&path)?,
             });
         }
     }
@@ -74,13 +76,44 @@ fn validate(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn verify(bytes: &[u8], entry: &Entry) -> Result<()> {
+fn verify(actual: &str, entry: &Entry) -> Result<()> {
     ensure!(
-        digest(bytes) == entry.sha256,
+        actual == entry.sha256,
         "History changed or backup verification failed for {}; original files were not modified",
         entry.path.display()
     );
     Ok(())
+}
+
+// Only this fixed-size buffer is retained, regardless of transcript size.
+// The same pass hashes copied bytes before a staged file can be published.
+fn transfer(reader: &mut impl Read, writer: &mut impl Write) -> Result<String> {
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0; 1024 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..count])?;
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    transfer(&mut open_regular(path)?, &mut io::sink())
+}
+
+fn copy_verified(source: &Path, target: &Path, entry: &Entry) -> Result<()> {
+    let mut source = open_regular(source)?;
+    atomic_write_with(target, |target| {
+        let actual = transfer(&mut source, target)?;
+        verify(&actual, entry)
+    })
 }
 
 pub fn import(store: &Store, source: &Path) -> Result<String> {
@@ -109,6 +142,7 @@ pub fn import(store: &Store, source: &Path) -> Result<String> {
         "Source must not overlap Agent Relay storage"
     );
     let mut entries = Vec::new();
+    eprintln!("[i] Indexing history; large files may take time");
     inventory(&source, &source, &mut entries)?;
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     ensure!(!entries.is_empty(), "Source projects directory is empty");
@@ -160,14 +194,12 @@ fn complete(store: &Store, operation: &Path) -> Result<()> {
             let target = operation.join("snapshot").join(&entry.path);
             validate_tree_path(&operation.join("snapshot"), &entry.path)?;
             if target.try_exists()? {
-                verify(&read_regular(&target)?, entry)?;
+                verify(&hash_file(&target)?, entry)?;
             } else {
                 let source = manifest.source.join(&entry.path);
                 // Check intermediate components too; never follow substituted links.
                 validate_tree_path(&manifest.source, &entry.path)?;
-                let bytes = read_regular(&source)?;
-                verify(&bytes, entry)?;
-                atomic_write(&target, &bytes)?;
+                copy_verified(&source, &target, entry)?;
             }
         }
         manifest.phase = Phase::Merging;
@@ -176,8 +208,7 @@ fn complete(store: &Store, operation: &Path) -> Result<()> {
     let mut conflicts = 0;
     for entry in &manifest.entries {
         validate_tree_path(&operation.join("snapshot"), &entry.path)?;
-        let bytes = read_regular(&operation.join("snapshot").join(&entry.path))?;
-        verify(&bytes, entry)?;
+        let snapshot = operation.join("snapshot").join(&entry.path);
         let destination = store.projects().join(&entry.path);
         validate_tree_path(&store.projects(), &entry.path)?;
         match fs::symlink_metadata(&destination) {
@@ -187,14 +218,16 @@ fn complete(store: &Store, operation: &Path) -> Result<()> {
                     "Unsafe existing history entry: {}",
                     destination.display()
                 );
-                if digest(&read_regular(&destination)?) != entry.sha256 {
+                if hash_file(&destination)? != entry.sha256 {
                     let conflict = operation.join("conflicts").join(&entry.path);
-                    atomic_write(&conflict, &bytes)?;
+                    copy_verified(&snapshot, &conflict, entry)?;
                     conflicts += 1;
+                } else {
+                    verify(&hash_file(&snapshot)?, entry)?;
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                atomic_write(&destination, &bytes)?
+                copy_verified(&snapshot, &destination, entry)?
             }
             Err(e) => return Err(e.into()),
         }
@@ -234,4 +267,64 @@ fn validate_tree_path(root: &Path, relative: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfer_handles_interrupted_and_short_reads_with_a_bounded_buffer() -> Result<()> {
+        struct ShortReader<'a> {
+            input: &'a [u8],
+            interrupted: bool,
+            largest_request: usize,
+        }
+        impl Read for ShortReader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.largest_request = self.largest_request.max(buffer.len());
+                if !self.interrupted {
+                    self.interrupted = true;
+                    Err(io::ErrorKind::Interrupted.into())
+                } else {
+                    let count = buffer.len().min(self.input.len()).min(3);
+                    buffer[..count].copy_from_slice(&self.input[..count]);
+                    self.input = &self.input[count..];
+                    Ok(count)
+                }
+            }
+        }
+        let mut reader = ShortReader {
+            input: b"hello world",
+            interrupted: false,
+            largest_request: 0,
+        };
+        let mut output = Vec::new();
+        let hash = transfer(&mut reader, &mut output)?;
+        assert_eq!(output, b"hello world");
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+        assert_eq!(reader.largest_request, 1024 * 1024);
+        Ok(())
+    }
+
+    #[test]
+    fn hash_mismatch_does_not_replace_existing_destination_or_leave_a_partial_file() -> Result<()> {
+        let temporary = tempfile::TempDir::new()?;
+        let root = temporary.path().canonicalize()?;
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"changed source")?;
+        fs::write(&target, b"existing history")?;
+        let entry = Entry {
+            path: "source".into(),
+            sha256: "0".repeat(64),
+        };
+        assert!(copy_verified(&source, &target, &entry).is_err());
+        assert_eq!(fs::read(&target)?, b"existing history");
+        assert_eq!(fs::read_dir(root)?.count(), 2);
+        Ok(())
+    }
 }

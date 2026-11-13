@@ -110,6 +110,8 @@ Migration is explicit and separate from adding accounts. Never rewrite an existi
 
 A failure must leave original data available and a clear recovery path. Do not assume several filesystem changes form one atomic transaction. Migration should be restartable from its manifest.
 
+Hash and copy transcript files in bounded chunks rather than loading them into memory. Large files must not inherit the JSON configuration reader's size limit. Verify the bytes written to a staged copy before publishing it; read, write, and hash failures must preserve existing destination files. Retained snapshots and destination copies require additional disk space even though memory use stays bounded.
+
 ## Process behavior
 
 Resolve and launch the official agent executable directly with an argument array. Preserve the working directory, terminal interaction, signals, and exit status. Avoid shell command construction. Account selection is captured once for each process and inherited by its children.
