@@ -83,6 +83,8 @@ Per-account settings remain independent by default. Do not symlink the entire se
 
 Settings precedence and authentication sources change across Claude versions. Maintain a tested compatibility range and use an official effective-authentication check when one is available. Unknown or unreadable authentication configuration must not be presented as verified subscription-only usage. Preflight is a compatibility safeguard, not a security boundary against arbitrary executables, hooks, or subsequent configuration changes.
 
+Enrollment verifies an active subscription login. Normal launches verify the saved login's method, config directory, plan, and registered identity without requiring an unexpired access token. A structured `claude.ai` status that reports `loggedIn: false` or exits 1 may proceed to the official CLI for refresh only if those checks still pass. Missing or contradictory metadata must not fall back to the registry alone. Relay never performs OAuth refresh or invokes login implicitly; Claude owns refresh and any necessary reauthentication.
+
 Subscription authentication also does not guarantee zero additional charges: account-level extra-usage policies are controlled by the provider. Agent Relay must not claim to enforce those billing policies.
 
 ## History and resume

@@ -49,10 +49,19 @@ if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
     exit 1
   fi
   if [ "${FAKE_INVALID_AUTH:-}" = yes ]; then printf 'sensitive-api-token'; exit 0; fi
+  if [ "${FAKE_INCOMPLETE_AUTH:-}" = yes ]; then printf '{"loggedIn":false,"authMethod":"none"}'; exit 1; fi
   email=$(cat "$CLAUDE_CONFIG_DIR/.identity")
-  printf '{"loggedIn":true,"authMethod":"%s","configDirectory":"%s","subscriptionType":"%s","email":"%s","orgId":"org-fixture"}\n' \
-    "${FAKE_AUTH_METHOD:-claude.ai}" "${FAKE_CONFIG_DIR:-$CLAUDE_CONFIG_DIR}" "${FAKE_SUBSCRIPTION:-max}" "$email"
-  exit 0
+  logged_in=true
+  status_exit=0
+  if [ "${FAKE_ACCESS_EXPIRED:-}" = yes ]; then logged_in=false; status_exit=${FAKE_STATUS_EXIT:-1}; fi
+  printf '{"loggedIn":%s,"authMethod":"%s","configDirectory":"%s","subscriptionType":"%s","email":"%s","orgId":"org-fixture"}\n' \
+    "$logged_in" "${FAKE_AUTH_METHOD:-claude.ai}" "${FAKE_CONFIG_DIR:-$CLAUDE_CONFIG_DIR}" "${FAKE_SUBSCRIPTION:-max}" "$email"
+  exit "$status_exit"
+fi
+if [ "${FAKE_ACCESS_EXPIRED:-}" = yes ]; then
+  if [ "${FAKE_REFRESH_REVOKED:-}" = yes ]; then printf 'refresh credential revoked' >&2; exit 42; fi
+  printf 'refreshed-by-claude' > "$CLAUDE_CONFIG_DIR/.credentials.json"
+  printf 'automatic-refresh\n'
 fi
 if [ -n "${FAKE_MARKER:-}" ]; then printf 'started' > "$FAKE_MARKER"; fi
 if [ "${FAKE_WAIT:-}" = yes ]; then
@@ -865,5 +874,159 @@ fn switching_and_failed_status_checks_never_invoke_login() -> TestResult {
     failure(&output, "status-check failure does not prove");
     assert!(!String::from_utf8_lossy(&output.stderr).contains("account login"));
     assert_eq!(fs::read_to_string(&log)?.lines().count(), 2);
+    Ok(())
+}
+
+#[test]
+fn expired_access_token_reaches_claude_refresh_and_resumes_without_login() -> TestResult {
+    let f = Fixture::new()?;
+    let log = f.home.join("login-invocations");
+    for name in ["personal", "work"] {
+        success(
+            &f.command(&["account", "add", name])
+                .env("FAKE_EMAIL", format!("{name}@example.test"))
+                .env("FAKE_LOGIN_LOG", &log)
+                .output()?,
+        );
+    }
+    success(&f.command(&["run", "work"]).output()?);
+    let work_credential = fs::read(f.account("work").join(".credentials.json"))?;
+    for status_exit in ["0", "1"] {
+        let output = f
+            .command(&["run", "personal", "--", "--continue"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("FAKE_STATUS_EXIT", status_exit)
+            .env("FAKE_LOGIN_LOG", &log)
+            .output()?;
+        success(&output);
+        let text = String::from_utf8(output.stdout)?;
+        assert!(text.contains("automatic-refresh"));
+        assert!(text.contains("account=personal@example.test"));
+        assert!(text.contains("remember this"));
+        assert!(text.contains("fixture-result"));
+        assert_eq!(
+            fs::read_to_string(f.account("personal").join(".credentials.json"))?,
+            "refreshed-by-claude"
+        );
+    }
+    success(&f.command(&["account", "default", "personal"]).output()?);
+    success(
+        &f.command(&["run", "--", "--resume", "session-fixture"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("FAKE_LOGIN_LOG", &log)
+            .output()?,
+    );
+    assert_eq!(fs::read_to_string(log)?.lines().count(), 2);
+    assert_eq!(
+        fs::read(f.account("work").join(".credentials.json"))?,
+        work_credential
+    );
+    Ok(())
+}
+
+#[test]
+fn refreshable_status_does_not_bypass_provider_identity_or_plan_checks() -> TestResult {
+    let f = Fixture::new()?;
+    f.add("personal")?;
+    for method in [
+        "api_key",
+        "apiKey",
+        "api_key_helper",
+        "third_party",
+        "oauth_token",
+        "none",
+    ] {
+        failure(
+            &f.command(&["run"])
+                .env("FAKE_ACCESS_EXPIRED", "yes")
+                .env("FAKE_AUTH_METHOD", method)
+                .output()?,
+            "claude.ai subscription login",
+        );
+    }
+    failure(
+        &f.command(&["run"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("FAKE_SUBSCRIPTION", "free")
+            .output()?,
+        "recognized paid subscription",
+    );
+    failure(
+        &f.command(&["run"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("FAKE_CONFIG_DIR", &f.home)
+            .output()?,
+        "different config directory",
+    );
+    failure(
+        &f.command(&["run"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("ANTHROPIC_API_KEY", "sensitive-value")
+            .output()?,
+        "ANTHROPIC_API_KEY",
+    );
+    failure(
+        &f.command(&["run"])
+            .env("FAKE_INCOMPLETE_AUTH", "yes")
+            .output()?,
+        "Unrecognized Claude auth status",
+    );
+    fs::write(
+        f.account("personal").join(".identity"),
+        "other@example.test",
+    )?;
+    failure(
+        &f.command(&["run"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .output()?,
+        "identity changed",
+    );
+    Ok(())
+}
+
+#[test]
+fn account_registration_and_doctor_still_require_an_active_verified_login() -> TestResult {
+    let f = Fixture::new()?;
+    let output = f
+        .command(&["account", "add", "personal"])
+        .env("FAKE_ACCESS_EXPIRED", "yes")
+        .env("FAKE_STATUS_EXIT", "0")
+        .output()?;
+    failure(&output, "active claude.ai subscription login");
+    assert!(!f.root.join("config.json").exists());
+    f.add("personal")?;
+    failure(
+        &f.command(&["doctor"])
+            .env("FAKE_ACCESS_EXPIRED", "yes")
+            .env("FAKE_STATUS_EXIT", "0")
+            .output()?,
+        "active claude.ai subscription login",
+    );
+    Ok(())
+}
+
+#[test]
+fn rejected_refresh_is_left_to_claude_without_relogin_or_credential_deletion() -> TestResult {
+    let f = Fixture::new()?;
+    f.add("personal")?;
+    success(&f.command(&["run"]).output()?);
+    let credential_path = f.account("personal").join(".credentials.json");
+    let credential = fs::read(&credential_path)?;
+    let transcript = f
+        .root
+        .join("shared/claude/projects/fixture-project/session-fixture.jsonl");
+    let saved = fs::read(&transcript)?;
+    let login_log = f.home.join("unexpected-login");
+    let output = f
+        .command(&["run", "--", "--continue"])
+        .env("FAKE_ACCESS_EXPIRED", "yes")
+        .env("FAKE_REFRESH_REVOKED", "yes")
+        .env("FAKE_LOGIN_LOG", &login_log)
+        .output()?;
+    assert_eq!(output.status.code(), Some(42));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refresh credential revoked"));
+    assert!(!login_log.exists());
+    assert_eq!(fs::read(credential_path)?, credential);
+    assert_eq!(fs::read(transcript)?, saved);
     Ok(())
 }

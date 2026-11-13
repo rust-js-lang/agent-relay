@@ -250,7 +250,7 @@ impl Claude {
     }
 
     pub fn check_version(&self, home: &Path, project: &Path) -> Result<String> {
-        let output = probe(self.command(home, project).arg("--version"))?;
+        let output = probe(self.command(home, project).arg("--version"), false)?;
         let version = output
             .split_whitespace()
             .next()
@@ -268,9 +268,18 @@ impl Claude {
     }
 
     pub fn auth(&self, home: &Path, project: &Path) -> Result<Account> {
+        self.check_auth(home, project, false)
+    }
+
+    pub fn auth_for_launch(&self, home: &Path, project: &Path) -> Result<Account> {
+        self.check_auth(home, project, true)
+    }
+
+    fn check_auth(&self, home: &Path, project: &Path, allow_refresh: bool) -> Result<Account> {
         let output = probe(
             self.command(home, project)
                 .args(["auth", "status", "--json"]),
+            allow_refresh,
         )
         .context("Cannot verify saved login; retry first. A status-check failure does not prove that sign-in expired; credentials were left untouched")?;
         let auth: AuthStatus = serde_json::from_str(&output).map_err(|_| {
@@ -279,7 +288,7 @@ impl Claude {
             )
         })?;
         ensure!(
-            auth.logged_in && auth.auth_method == "claude.ai",
+            (auth.logged_in || allow_refresh) && auth.auth_method == "claude.ai",
             "Claude did not report an active claude.ai subscription login; refusing to launch"
         );
         ensure!(
@@ -300,6 +309,13 @@ impl Claude {
             .email
             .filter(|s| !s.is_empty())
             .context("Claude did not report an account email")?;
+        if !auth.logged_in {
+            // A saved identity is not a token-freshness verdict. As in Omarchy,
+            // let Claude use its own refresh credential; never refresh/copy it here.
+            eprintln!(
+                "[i] Saved subscription login identified; Claude will attempt to refresh it if needed"
+            );
+        }
         Ok(Account {
             email,
             org_id: auth.org_id,
@@ -308,7 +324,7 @@ impl Claude {
     }
 }
 
-fn probe(command: &mut Command) -> Result<String> {
+fn probe(command: &mut Command, allow_logged_out: bool) -> Result<String> {
     // Write output to anonymous temporary files: bounded pipe reads can deadlock if
     // an unexpected wrapper fills stdout/stderr before it exits. Never echo stderr,
     // which may include credentials. Temporary files are unlinked before spawning.
@@ -331,7 +347,7 @@ fn probe(command: &mut Command) -> Result<String> {
         std::thread::sleep(Duration::from_millis(20));
     };
     ensure!(
-        status.success(),
+        status.success() || (allow_logged_out && status.code() == Some(1)),
         "Claude local status check failed (exit {:?}; output hidden)",
         status.code()
     );
@@ -339,6 +355,10 @@ fn probe(command: &mut Command) -> Result<String> {
     output.seek(SeekFrom::Start(0))?;
     let mut data = String::new();
     output.take(1024 * 1024 + 1).read_to_string(&mut data)?;
+    ensure!(
+        status.success() || !data.trim().is_empty(),
+        "Claude status check exited without structured authentication data"
+    );
     ensure!(
         data.len() <= 1024 * 1024,
         "Claude status response exceeded 1 MiB"
