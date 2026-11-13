@@ -139,7 +139,7 @@ fn execute(cli: Cli) -> Result<()> {
             let home = store.prepare_account(&name)?;
             let claude = Claude::resolve(cli.claude)?;
             preflight(&claude, &home, &project)?;
-            let identity = claude.auth(&home, &project)?;
+            let identity = claude.auth_for_launch(&home, &project)?;
             verify_identity(&store, &name, &identity)?;
             eprintln!("[i] Account: {name} ({})", identity.email);
             eprintln!("[i] Shared transcripts: {}", store.projects().display());

@@ -48,7 +48,9 @@ agent-relay doctor work
 
 Changing the default does not change a running process's account. There is no automatic switching inside a live session. Exit Claude and launch the next account to resume.
 
-Log in once per account, then reuse those saved logins. `run`, `doctor`, and default selection never invoke browser login or log an account out. Claude owns automatic access-token refresh; switching accounts does not invalidate another account's saved login. Browser sign-in can still be necessary when the saved refresh credential expires, is revoked, or becomes unavailable. A failed local status probe is not proof of expiry: Relay refuses the unverified launch, preserves the login, and suggests retrying rather than automatically reauthenticating. Aged-but-refreshable login behavior is a live acceptance requirement.
+Log in once per account, then reuse those saved logins. `run`, `doctor`, and default selection never invoke browser login or log an account out. Claude owns automatic access-token refresh; switching accounts does not invalidate another account's saved login. Launch preflight checks the saved subscription identity, not access-token freshness: `loggedIn: false` and status exit code 1 are accepted for a registered account when Claude still identifies its `claude.ai` method, config directory, paid plan, and matching identity. Claude can then refresh its saved login normally. Registration and `doctor` still require `loggedIn: true`. Missing/invalid status data, API authentication, provider conflicts, and changed identities remain blocking errors; they are never silently accepted as refreshable logins.
+
+Browser sign-in can still be necessary when the saved refresh credential expires, is revoked, or becomes unavailable. Relay does not attempt refresh itself or interpret a generic probe failure as a reason to log in again. Synthetic integration tests cover the refresh handoff and rejected refresh without deleting credentials or history. Real aged-but-refreshable login behavior remains a live acceptance requirement for each supported Claude version.
 
 ## History guarantees and limits
 
@@ -82,7 +84,7 @@ Recovery verifies hashes and resumes from the saved manifest. Backups are retain
 
 Relay refuses known authentication/routing environment overrides, including `ANTHROPIC_*`, OAuth-token overrides, cloud-provider switches, and credential file descriptors. It also rejects variables that disable transcript persistence or remove the selected account from subprocess environments. Errors name the conflicting setting without showing its value.
 
-It inspects account settings, project/ancestor settings, and system managed settings files for provider credentials and helpers. The effective local `claude auth status` must then report the selected config directory, a `claude.ai` login, and a recognized paid plan. API keys, credential helpers, and cloud-provider authentication are refused. No default-account launch bypasses these checks.
+It inspects account settings, project/ancestor settings, and system managed settings files for provider credentials and helpers. The local `claude auth status` must then identify the selected config directory, a saved `claude.ai` login, and a recognized paid plan. A launch may hand a saved login to Claude for refresh even when status reports it logged out; this never bypasses method, plan, directory, or identity checks. API keys, credential helpers, and cloud-provider authentication are refused. No default-account launch bypasses these checks.
 
 Flags that bypass verification or history persistence, change the project at launch, or detach the process are unsupported, including `--settings`, `--setting-sources`, `--bare`, `--no-session-persistence`, `--worktree`, and `--bg`. Use ordinary `--continue`, `--resume`, and prompt arguments.
 

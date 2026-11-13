@@ -14,6 +14,10 @@ claude-swap (`b042283`) uses `claude auth status --json` in `src/claude_swap/ses
 
 Relay refuses a launch when it cannot verify authentication, but retains the account directory, credentials, and shared history. It additionally requires the selected config directory and a recognized subscription plan. Missing subscription metadata can therefore refuse a valid login; the error is a verification failure, not proof that the user lacks a subscription.
 
+Omarchy's `bin/omarchy-agent-usage-claude` distinguishes access-token expiry from refresh-credential expiry. When an access token lapses but its refresh credential remains valid, it tells the user to start Claude, rather than sign in again. Its launcher does not gate execution on access-token expiry. Relay follows that separation: enrollment requires an active verified login, while launch accepts complete, matching saved subscription metadata even with `loggedIn: false` or auth-status exit 1. It then executes Claude, which owns refresh. Unknown/partial status data and explicitly different authentication methods remain refusals. No cached-registry-only fallback is used.
+
+Integration tests simulate both status exit codes, successful CLI-owned refresh followed by cross-account resume, rejected refresh, and refusal of API methods or changed identities even on the refresh path. This tests Relay's handoff, not a live token endpoint or Claude's actual version-specific status output.
+
 ## History must remain live and conflicts must survive
 
 claude-swap's `TestShareHistoryPosix` checks links, repeated synchronization, preservation of existing user files, merge collisions, and that no transcript is deleted. Its `TestHistoryMergeSharesTheDestination` tests serialization when separate account stores share a destination and ensures linking finishes before releasing the migration lock.
