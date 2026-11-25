@@ -6,12 +6,16 @@ Each account logs in independently through the official Claude CLI. Accounts sha
 
 ## Install
 
-Requires macOS or Linux, Rust 1.100, and the official Claude CLI. The toolchain file pins Rust 1.100.0. Windows is not supported yet.
+Requires macOS with the Command Line Tools (`xcode-select --install`, which provides `/usr/bin/python3`) and the official Claude CLI. Agent Relay is one Python file using only the standard library of Python 3.9; there is nothing else to install. Linux and Windows are not supported.
 
 ```sh
-cargo install --path . --locked
+./install.sh            # installs ~/.local/bin/agent-relay (or ./install.sh /other/path)
 agent-relay --help
 ```
+
+The installed copy starts on the Python.app binary behind `/usr/bin/python3`, not on `/usr/bin/python3` itself: that stub adds `SDKROOT`, `CPATH`, `LIBRARY_PATH` and `MANPATH` to the environment, which Claude and every build it runs would inherit. Claude receives exactly the environment Relay was started with.
+
+Agent Relay 0.1.0 was first written in Rust; this Python port keeps its commands, files, messages and exit codes, so data created by the Rust version keeps working. The Rust source remains in the git history.
 
 The initial compatibility gate accepts Claude Code `>=2.1.268` and `<2.2.0`, requiring the documented `configDirectory` field in `claude auth status`. This is a required API contract, not a claim that every version in that range has passed live acceptance. Live subscription testing is still required before a production release.
 
@@ -94,10 +98,7 @@ This is preflight validation, not enforcement against configuration changes, in-
 
 ## Storage
 
-Defaults:
-
-- macOS: `~/Library/Application Support/agent-relay`
-- Linux: `$XDG_DATA_HOME/agent-relay`, or `~/.local/share/agent-relay`
+Default: `~/Library/Application Support/agent-relay`.
 
 Use `--root /absolute/path` or `AGENT_RELAY_HOME` to select another root, and `--claude /absolute/path/to/claude` to select an executable. Application-owned directories and files are created privately. An existing application root must have mode `0700`.
 
@@ -113,13 +114,12 @@ locks/                        persistent OS lock files
 ## Local development and verification
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked
+/usr/bin/python3 -m unittest discover -s tests -v
+AGENT_RELAY_BIN=/path/to/agent-relay /usr/bin/python3 -m unittest discover -s tests   # test another build
 ```
 
 Validation runs locally; this repository does not use GitHub Actions.
 
-Integration tests use a fake Claude executable and isolated temporary homes. They cover cross-account resume plumbing, authentication conflicts, default selection, process exit and signals, concurrent-writer exclusion, corrupt metadata, and import recovery. They do not prove compatibility with a live Claude service.
+Integration tests use a fake Claude executable and isolated temporary homes. They run an installed copy, started the way `install.sh` starts it. They cover cross-account resume plumbing, authentication conflicts, default selection, process exit and signals, concurrent-writer exclusion, corrupt metadata, and import recovery. Further tests pin what the port must keep from the Rust version: the exact environment Claude receives, default `SIGPIPE` in Claude, byte-identical `config.json` and manifest files, and error texts. The command-line tests pass against both the Rust 0.1.0 binary and this port. They do not prove compatibility with a live Claude service.
 
 Before releasing a version, follow [the live acceptance procedure](docs/live-acceptance.md) with explicitly authorized accounts on each supported platform. See [DESIGN.md](DESIGN.md) for the design and its limits.
